@@ -9,7 +9,7 @@ import os
 
 from google import genai
 
-load_dotenv(Path(__file__).with_name(".env"))
+# load_dotenv(Path(__file__).with_name(".env"))
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
