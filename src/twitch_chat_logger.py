@@ -24,7 +24,9 @@ or ngrok needed. Only the Python standard library (Python 3.7+).
 """
 
 import json
+import os
 import random
+import re
 import socket
 import ssl
 import threading
@@ -33,10 +35,12 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from selector import select_cards      # the AI step (needs GEMINI_API_KEY, or MOCK=1 to test)
+
 # ======================= SETTINGS YOU CAN CHANGE =======================
 
 # The stream whose chat we listen to - the name in twitch.tv/<name>
-TWITCH_USERNAME = "your_channel_here"
+TWITCH_USERNAME = "emiru"  # change this to the channel you want to log
 
 # Where the .txt dumps go (default: the same folder as this script).
 OUTPUT_FOLDER = Path(__file__).resolve().parent
@@ -45,6 +49,9 @@ OUTPUT_FOLDER = Path(__file__).resolve().parent
 FRONTEND_FILE = Path(__file__).resolve().parent / "index.html"
 
 PORT = 8000
+
+# MOCK=1 python twitch_chat_logger.py  -> fake AI, no API key needed (for testing the page)
+USE_MOCK = os.environ.get("MOCK") == "1"
 
 # =======================================================================
 
@@ -144,6 +151,33 @@ def listen_to_twitch_chat():
     print("[stopped listening]")
 
 
+# ------------------------ Turning chat into AI input ------------------------
+
+LINE = re.compile(r"^\d\d:\d\d:\d\d (.+?): (.*)$")
+
+def to_ai_lines(messages):
+    """'HH:MM:SS name: message'  ->  'name: message'. Skips /me action lines."""
+    out = []
+    for line in messages:
+        if re.match(r"^\d\d:\d\d:\d\d \* ", line):
+            continue
+        m = LINE.match(line)
+        if m and m.group(2).strip():
+            out.append(f"{m.group(1)}: {m.group(2).strip()}")
+    return out
+
+
+def run_ai(messages):
+    """Returns (cards, error). Never raises, so Stop always answers the page."""
+    lines = to_ai_lines(messages)
+    if not lines:
+        return None, "No chat messages were collected, so there is nothing to send to the AI."
+    try:
+        return select_cards(lines, mock=USE_MOCK)["cards"], None
+    except Exception as error:
+        return None, f"AI step failed: {error}"
+
+
 # --------------------------- Start / Stop logic ---------------------------
 
 def save_chat_log(messages, start, end):
@@ -179,7 +213,7 @@ def stop_listening():
     global read_chat
     with lock:
         if not read_chat:
-            return "Not listening - press Start first."
+            return "Not listening - press Start first.", None, None
         read_chat = False
     listener_thread.join()               # wait for the loop to finish (about 1 second)
     end_time = datetime.now()
@@ -187,7 +221,8 @@ def stop_listening():
         messages = list(chat_messages)
     path = save_chat_log(messages, start_time, end_time)
     print(f"[saved] {len(messages)} messages to {path}")
-    return f"Stopped. Saved {len(messages)} messages to {path.name}"
+    cards, error = run_ai(messages)
+    return f"Stopped. Saved {len(messages)} messages to {path.name}", cards, error
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -205,12 +240,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/start":
-            status = start_listening()
+            reply = {"status": start_listening()}
         elif self.path == "/stop":
-            status = stop_listening()
+            status, cards, error = stop_listening()
+            reply = {"status": status, "cards": cards, "error": error}
         else:
             return self.respond(404, "Not found", "text/plain")
-        self.respond(200, json.dumps({"status": status}), "application/json")
+        self.respond(200, json.dumps(reply), "application/json")
 
     def respond(self, code, body, content_type):
         data = body.encode("utf-8")
