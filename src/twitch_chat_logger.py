@@ -13,6 +13,7 @@ Routes the frontend talks to:
     GET  /status   -> {"channel", "listening", "connected", "count"}
     POST /start    -> {"status": "..."}
     POST /stop     -> {"status": "..."}
+    POST /paste    -> {"status", "cards", "error"}   backup: pasted chat -> AI
 
 Start -> read_chat = True: connects to the stream's chat and collects
          every message while `while read_chat:` keeps looping
@@ -167,6 +168,68 @@ def to_ai_lines(messages):
     return out
 
 
+# ------------------------ Backup: pasted chat ------------------------
+# If the Twitch connection breaks during the show, someone copies the chat
+# from Twitch, pastes it into the box on the page, and it goes to the AI
+# the same way a normal round does. Also handy for testing with fake chat.
+
+MAX_PASTED_LINES = 500                     # keep only the most recent lines
+PASTE_TIME = re.compile(r"^\[?\d{1,2}:\d{2}(:\d{2})?\s*([AaPp][Mm])?\]?\s+")
+PASTE_NAME = re.compile(r"^(\S{1,25}?)\s*:\s+(.+)$")
+LOG_HEADER = re.compile(r"^(Twitch chat log - |Started: |Stopped: |Messages: |Pasted chat - |=+$)")
+
+
+def parse_pasted_chat(text):
+    """Turn messy pasted chat into 'name: message' lines.
+
+    Handles timestamps ('12:34', '12:34:56', '[3:05 PM]'), our own saved .txt
+    logs, '/me' lines ('* name waves'), and lines with no name at all
+    (those become 'pasted: message').
+    """
+    out = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or LOG_HEADER.match(line):
+            continue
+        line = PASTE_TIME.sub("", line)
+        if line.startswith("* "):                  # /me line from our own logs
+            name, _, msg = line[2:].partition(" ")
+            if msg.strip():
+                out.append(f"{name}: {msg.strip()}")
+            continue
+        m = PASTE_NAME.match(line)
+        if m:
+            out.append(f"{m.group(1)}: {m.group(2).strip()}")
+        else:
+            out.append(f"pasted: {line}")
+    return out[-MAX_PASTED_LINES:]
+
+
+def save_pasted_log(lines):
+    path = OUTPUT_FOLDER / f"pasted_chat_{datetime.now():%Y-%m-%d_%H-%M-%S}.txt"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"Pasted chat - {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+        f.write(f"Messages: {len(lines)}\n")
+        f.write("=" * 40 + "\n\n")
+        for line in lines:
+            f.write(line + "\n")
+    return path
+
+
+def run_pasted(text):
+    """Returns (status, cards, error) for the Send Pasted Chat button."""
+    lines = parse_pasted_chat(text or "")
+    if not lines:
+        return "Nothing to send.", None, "The paste box is empty."
+    path = save_pasted_log(lines)
+    print(f"[pasted] {len(lines)} messages saved to {path}")
+    try:
+        cards = select_cards(lines, mock=USE_MOCK)["cards"]
+        return f"Sent {len(lines)} pasted messages to the AI (saved to {path.name})", cards, None
+    except Exception as error:
+        return f"Saved {len(lines)} pasted messages to {path.name}", None, f"AI step failed: {error}"
+
+
 def run_ai(messages):
     """Returns (cards, error). Never raises, so Stop always answers the page."""
     lines = to_ai_lines(messages)
@@ -243,6 +306,14 @@ class Handler(BaseHTTPRequestHandler):
             reply = {"status": start_listening()}
         elif self.path == "/stop":
             status, cards, error = stop_listening()
+            reply = {"status": status, "cards": cards, "error": error}
+        elif self.path == "/paste":
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                text = json.loads(self.rfile.read(length) or b"{}").get("text", "")
+            except (ValueError, AttributeError):
+                text = ""
+            status, cards, error = run_pasted(text)
             reply = {"status": status, "cards": cards, "error": error}
         else:
             return self.respond(404, "Not found", "text/plain")
