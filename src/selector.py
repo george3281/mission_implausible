@@ -4,7 +4,15 @@ Output format (from George's updated instruction file):
 """
 import os, re, json
 
-MODEL = "gemini-2.5-flash"   # change if Google renames it
+MODEL = "gemini-3.8-flash"   # change if Google renames it
+
+# Load ../.env (KEY=value lines) without overriding real env vars
+_env = os.path.join(os.path.dirname(__file__), "..", ".env")
+if os.path.exists(_env):
+    for _l in open(_env, encoding="utf-8"):
+        if "=" in _l and not _l.lstrip().startswith("#"):
+            k, v = _l.strip().split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip().strip('"\''))
 BAD = re.compile(r"ignore (all |your )?(previous |prior )?instructions|\bsystem:", re.I)
 
 def clean_lines(chat):
@@ -52,7 +60,9 @@ def call_gemini(instructions, chat, transcript):
     r = client.models.generate_content(
         model=MODEL, contents=build_prompt(chat, transcript),
         config={"system_instruction": instructions,
-                "response_mime_type": "application/json", "temperature": 0.7})
+                "response_mime_type": "application/json", "temperature": 0.7,
+                # default thinking took 90-170s per call; low is ~3s (C1: 30s budget)
+                "thinking_config": {"thinking_level": "low"}})
     return r.text
 
 def call_mock(instructions, chat, transcript):
@@ -72,7 +82,7 @@ def call_mock(instructions, chat, transcript):
 def select_cards(chat, transcript="", instructions=None, mock=False, tries=3):
     chat = clean_lines(chat)
     if instructions is None:
-        instructions = open(os.path.join(os.path.dirname(__file__), "instructions.txt"), encoding="utf-8").read()
+        instructions = open(os.path.join(os.path.dirname(__file__), "..", "prompt.md"), encoding="utf-8").read()
     call = call_mock if mock else call_gemini
     last = ["no attempt made"]
     for _ in range(tries):
