@@ -10,10 +10,10 @@ Open:  http://localhost:8000
 
 Routes the frontend talks to:
     GET  /         -> serves index.html
-    GET  /status   -> {"channel", "listening", "connected", "count"}
+    GET  /status   -> {"channel", "listening", "connected", "count", "messages"}
     POST /start    -> {"status": "..."}
-    POST /stop     -> {"status": "..."}
-    POST /paste    -> {"status", "cards", "error"}   backup: pasted chat -> AI
+    POST /stop     -> {"status", "cards", "error", "messages"}
+    POST /paste    -> {"status", "cards", "error", "messages"}   backup: pasted chat -> AI
 
 Start -> read_chat = True: connects to the stream's chat and collects
          every message while `while read_chat:` keeps looping
@@ -64,6 +64,7 @@ connected = False          # True once we've actually joined the chat
 chat_messages = []         # messages collected in the current start-stop window
 start_time = None
 listener_thread = None
+last_round = []          # 'name: message' lines from the last round, shown on the page
 lock = threading.Lock()
 
 
@@ -221,6 +222,8 @@ def run_pasted(text):
     lines = parse_pasted_chat(text or "")
     if not lines:
         return "Nothing to send.", None, "The paste box is empty."
+    global last_round
+    last_round = lines
     path = save_pasted_log(lines)
     print(f"[pasted] {len(lines)} messages saved to {path}")
     try:
@@ -273,15 +276,17 @@ def start_listening():
 
 
 def stop_listening():
-    global read_chat
+    global read_chat, last_round
     with lock:
         if not read_chat:
-            return "Not listening - press Start first.", None, None
+            last_round = []
+            return "Not capturing chat - press Capture Chat first.", None, None
         read_chat = False
     listener_thread.join()               # wait for the loop to finish (about 1 second)
     end_time = datetime.now()
     with lock:
         messages = list(chat_messages)
+    last_round = to_ai_lines(messages)
     path = save_chat_log(messages, start_time, end_time)
     print(f"[saved] {len(messages)} messages to {path}")
     cards, error = run_ai(messages)
@@ -296,7 +301,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/status":
             with lock:
                 status = {"channel": TWITCH_USERNAME, "listening": read_chat,
-                          "connected": connected, "count": len(chat_messages)}
+                          "connected": connected, "count": len(chat_messages),
+                          # live chat for the left panel while capturing (last 200 messages)
+                          "messages": to_ai_lines(chat_messages[-200:]) if read_chat else []}
             self.respond(200, json.dumps(status), "application/json")
         else:
             self.respond(404, "Not found", "text/plain")
@@ -306,7 +313,7 @@ class Handler(BaseHTTPRequestHandler):
             reply = {"status": start_listening()}
         elif self.path == "/stop":
             status, cards, error = stop_listening()
-            reply = {"status": status, "cards": cards, "error": error}
+            reply = {"status": status, "cards": cards, "error": error, "messages": last_round}
         elif self.path == "/paste":
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -314,7 +321,7 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, AttributeError):
                 text = ""
             status, cards, error = run_pasted(text)
-            reply = {"status": status, "cards": cards, "error": error}
+            reply = {"status": status, "cards": cards, "error": error, "messages": last_round}
         else:
             return self.respond(404, "Not found", "text/plain")
         self.respond(200, json.dumps(reply), "application/json")

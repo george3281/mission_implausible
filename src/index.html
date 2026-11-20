@@ -4,15 +4,33 @@
 <meta charset="utf-8">
 <title>Twitch Chat Logger</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 520px; margin: 60px auto; }
-  button { font-size: 18px; padding: 10px 28px; margin-right: 10px; cursor: pointer; }
+  body { font-family: system-ui, sans-serif; max-width: 1040px; margin: 40px auto; padding: 0 20px; }
+
+  /* Two columns: chat messages on the left, controls + cards on the right */
+  #layout { display: grid; grid-template-columns: 340px 1fr; gap: 32px; align-items: start; }
+  @media (max-width: 800px) { #layout { grid-template-columns: 1fr; } }
+
+  /* Left panel: the real chat messages each card came from */
+  #intel { background: #f4f5f7; border-radius: 10px; padding: 16px; position: sticky; top: 20px; }
+  #intel h3 { margin: 0 0 2px; font-size: 18px; }
+  #intel .sub { margin: 0 0 14px; color: #777; font-size: 13px; }
+  #intelList { max-height: 70vh; overflow-y: auto; }
+  .intel-empty { color: #999; font-size: 14px; }
+  .msg { background: white; border-radius: 8px; padding: 8px 10px; margin: 6px 0; font-size: 15px; line-height: 1.35; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .msg b { color: #6441a5; margin-right: 4px; }   /* Twitch purple for usernames */
+
+  /* Right side */
+  button { font-size: 17px; padding: 10px 22px; margin: 0 10px 8px 0; cursor: pointer; }
   #start { background: #2e7d32; color: white; border: none; border-radius: 6px; }
   #stop  { background: #c62828; color: white; border: none; border-radius: 6px; }
   #status { margin: 16px 0 4px; color: #555; }
   #count  { margin: 0 0 16px; color: #888; font-size: 14px; }
-  .card { border: 1px solid #ccc; border-radius: 8px; padding: 12px 14px; margin: 10px 0; font-size: 20px; }
-  .card small { display: block; margin-top: 8px; color: #777; font-size: 13px; }
+  .card { border: 1px solid #ccc; border-radius: 8px; padding: 12px 14px; margin: 10px 0; font-size: 20px; display: flex; gap: 12px; }
+  .card .num { flex: none; width: 28px; height: 28px; border-radius: 50%; background: #333; color: white;
+               font-size: 15px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+  .card small { display: block; margin-top: 6px; color: #777; font-size: 13px; }
   #error { color: #c62828; margin-top: 12px; }
+
   #backup { margin-top: 40px; padding-top: 16px; border-top: 1px dashed #bbb; }
   #backup h3 { margin: 0 0 4px; font-size: 16px; }
   #backup p { margin: 0 0 8px; color: #777; font-size: 13px; }
@@ -21,53 +39,76 @@
 </style>
 </head>
 <body>
-  <h2>Twitch Chat Logger</h2>
-  <p>Stream: <b id="channel">...</b></p>
+<div id="layout">
 
-  <button id="start" onclick="send('/start')">Start</button>
-  <button id="stop" onclick="send('/stop')">Stop</button>
+  <!-- LEFT: the chat messages the AI used for each card -->
+  <aside id="intel">
+    <h3>Intel from chat</h3>
+    <p class="sub" id="intelSub">Everything the online audience said this round</p>
+    <div id="intelList"><p class="intel-empty">Chat will show up here once you capture or paste it.</p></div>
+  </aside>
 
-  <p id="status">Not listening.</p>
-  <p id="count"></p>
+  <!-- RIGHT: controls and the 3 cards -->
+  <main>
+    <h2>Twitch Chat Logger</h2>
+    <p>Stream: <b id="channel">...</b></p>
 
-  <!-- The 3 AI-selected cards appear here after Stop -->
-  <div id="cards"></div>
-  <div id="error"></div>
+    <button id="start" onclick="send('/start')">Capture Chat</button>
+    <button id="stop" onclick="send('/stop')">Stop Capturing Chat</button>
 
-  <!-- Backup: if the Twitch connection breaks, paste chat here instead -->
-  <div id="backup">
-    <h3>Backup: paste chat</h3>
-    <p>If the chat connection stops working, copy the chat from Twitch, paste it here, and press Send.</p>
-    <textarea id="pasteBox" placeholder="viewer1: ask everyone what time they got here&#10;viewer2: have the suspects retell their story backwards"></textarea>
-    <button id="pasteBtn" onclick="sendPasted()">Send pasted chat to AI</button>
-  </div>
+    <p id="status">Not capturing chat.</p>
+    <p id="count"></p>
+
+    <!-- The 3 AI-selected cards appear here -->
+    <div id="cards"></div>
+    <div id="error"></div>
+
+    <!-- Backup: if the Twitch connection breaks, paste chat here instead -->
+    <div id="backup">
+      <h3>Backup: paste chat</h3>
+      <p>If the chat connection stops working, copy the chat from Twitch, paste it here, and press Send.</p>
+      <textarea id="pasteBox" placeholder="viewer1: ask everyone what time they got here&#10;viewer2: have the suspects retell their story backwards"></textarea>
+      <button id="pasteBtn" onclick="sendPasted()">Send pasted chat to AI</button>
+    </div>
+  </main>
+
+</div>
 
 <script>
-  // Tell the backend to start or stop, then show its reply (and the cards after Stop)
+  // Clear the old round before a new one
+  function clearRound() {
+    document.getElementById("error").textContent = "";
+    document.getElementById("cards").textContent = "";
+    showChat([]);
+  }
+
+  // Show the server's reply: status line, any error, and the cards
+  function showReply(data) {
+    document.getElementById("status").textContent = data.status;
+    if (data.error) document.getElementById("error").textContent = data.error;
+    if (data.messages) showChat(data.messages);
+    if (data.cards) showCards(data.cards);
+  }
+
+  // Tell the backend to start or stop capturing, then show its reply
   async function send(path) {
-    const cardsBox = document.getElementById("cards");
-    const errorBox = document.getElementById("error");
-    errorBox.textContent = "";
+    document.getElementById("error").textContent = "";
+    if (path === "/start") clearRound();
     if (path === "/stop") {
+      clearRound();
       document.getElementById("status").textContent = "AI is thinking...";
-      cardsBox.textContent = "";
     }
     try {
       const res = await fetch(path, { method: "POST" });
-      const data = await res.json();
-      document.getElementById("status").textContent = data.status;
-      if (data.error) errorBox.textContent = data.error;
-      if (data.cards) showCards(data.cards);
+      showReply(await res.json());
     } catch (e) {
       document.getElementById("status").textContent = "Could not reach the backend.";
     }
   }
 
-  // Backup: send whatever is in the paste box to the AI, show the cards the same way
+  // Backup: send whatever is in the paste box to the AI
   async function sendPasted() {
-    const errorBox = document.getElementById("error");
-    errorBox.textContent = "";
-    document.getElementById("cards").textContent = "";
+    clearRound();
     document.getElementById("status").textContent = "AI is thinking...";
     try {
       const res = await fetch("/paste", {
@@ -75,28 +116,58 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: document.getElementById("pasteBox").value }),
       });
-      const data = await res.json();
-      document.getElementById("status").textContent = data.status;
-      if (data.error) errorBox.textContent = data.error;
-      if (data.cards) showCards(data.cards);
+      showReply(await res.json());
     } catch (e) {
       document.getElementById("status").textContent = "Could not reach the backend.";
     }
   }
 
-  // textContent (not innerHTML), so chat text can never inject code into the page
+  // The 3 cards, numbered so they match the groups in the left panel.
+  // textContent (not innerHTML) everywhere, so chat text can never inject code into the page.
   function showCards(cards) {
     const box = document.getElementById("cards");
     box.textContent = "";
-    cards.forEach((c) => {
+    cards.forEach((c, i) => {
       const div = document.createElement("div");
       div.className = "card";
-      div.textContent = c.text;
+      const num = document.createElement("span");
+      num.className = "num";
+      num.textContent = i + 1;
+      const text = document.createElement("span");
+      text.textContent = c.text;
       const src = document.createElement("small");
-      src.textContent = c.chat && c.chat.length ? "From chat: " + c.chat[0] : "Invented by the AI";
-      div.appendChild(src);
+      src.textContent = c.chat && c.chat.length ? "From chat: " + c.chat[0] : "Written by the AI";
+      text.appendChild(src);
+      div.append(num, text);
       box.appendChild(div);
     });
+  }
+
+  // Left panel: every chat message from the round, oldest at the top.
+  // Fills in live while capturing, and keeps scrolling to the newest message.
+  let shownCount = -1;
+  function showChat(messages) {
+    if (messages.length === shownCount) return;   // nothing new, don't redraw
+    shownCount = messages.length;
+    const list = document.getElementById("intelList");
+    list.textContent = "";
+    if (!messages.length) {
+      const p = document.createElement("p");
+      p.className = "intel-empty";
+      p.textContent = "Chat will show up here once you capture or paste it.";
+      list.appendChild(p);
+      return;
+    }
+    messages.forEach((m) => {
+      const cut = m.indexOf(": ");
+      const row = document.createElement("div");
+      row.className = "msg";
+      const name = document.createElement("b");
+      name.textContent = cut > 0 ? m.slice(0, cut) : "chat";
+      row.append(name, cut > 0 ? m.slice(cut + 2) : m);
+      list.appendChild(row);
+    });
+    list.scrollTop = list.scrollHeight;
   }
 
   // Ask the backend how things are going, once a second
@@ -104,8 +175,9 @@
     try {
       const s = await (await fetch("/status")).json();
       document.getElementById("channel").textContent = "twitch.tv/" + s.channel;
+      if (s.listening) showChat(s.messages || []);
       document.getElementById("count").textContent = !s.listening ? "" :
-        (s.connected ? "Connected - " : "Connecting... ") + s.count + " messages so far";
+        (s.connected ? "Capturing - " : "Connecting... ") + s.count + " messages so far";
     } catch {
       document.getElementById("count").textContent = "Backend not running?";
     }
